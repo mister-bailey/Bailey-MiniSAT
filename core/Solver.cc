@@ -169,6 +169,7 @@ Var Solver::newVar(bool sign, bool dvar)
 #endif
 #if PROP_STATS
 	to_prop.push(0), to_prop.push(0);
+	assign_order.push(INT_MAX);
 #endif
     total_actual_rewards.push(0);
     total_actual_count.push(0);
@@ -211,14 +212,60 @@ void Solver::attachClause(CRef cr) {
     const Clause& c = ca[cr];
     assert(c.size() > 1);
 	if (c.size() > 2) {
-		watches[~c[0]].push(Watcher(cr, c[1]));
-		watches[~c[1]].push(Watcher(cr, c[0]));
+		if (c.learnt()) { // some variables in this clause may already be assigned. Must sort to invariant!
+			// first sort the first 3:
+			if (assign_order[var(c[1])] > assign_order[var(c[0])]) {
+				Lit p = c[0];
+				c[0] = c[1];
+				c[1] = p;
+			}
+			if (assign_order[var(c[2])] > assign_order[var(c[1])]) {
+				Lit p = c[1];
+				c[1] = c[2];
+				c[2] = p;
+			}
+			if (assign_order[var(c[1])] > assign_order[var(c[0])]) {
+				Lit p = c[0];
+				c[0] = c[1];
+				c[1] = p;
+			}
+			int num_undef = (assign_order[var(c[0])] == INT_MAX) + (assign_order[var(c[1])] == INT_MAX) + (assign_order[var(c[2])] == INT_MAX);
+			
+			for (int i = 3; num_undef < 3 && i < c.size(); i++) {
+				int li = assign_order[var(c[i])];
+				if (li > assign_order[var(c[0])]) {
+					Lit p = c[2];
+					c[2] = c[1];
+					c[1] = c[0];
+					c[0] = c[i];
+					c[i] = p;
+				}
+				else if (li > assign_order[var(c[1])]) {
+					Lit p = c[2];
+					c[2] = c[1];
+					c[1] = c[i];
+					c[i] = p;
+				}
+				else if (li > assign_order[var(c[2])]) {
+					Lit p = c[2];
+					c[2] = c[i];
+					c[i] = p;
+				}
+				if (li == INT_MAX) num_undef++;
+			}
+			if (value(c[2]) == l_False) {
+				to_prop[toInt(c[0])]++;
+				to_prop[toInt(c[1])]++;
+			}
+		}
 		watches[~c[2]].push(Watcher(cr, c[0]));
+	} else {
+		to_prop[toInt(c[0])]++;
+		to_prop[toInt(c[1])]++;
 	}
-	else {
-		watches[~c[0]].push(Watcher(cr, c[1]));
-		watches[~c[1]].push(Watcher(cr, c[0]));
-	}
+	watches[~c[0]].push(Watcher(cr, c[1]));
+	watches[~c[1]].push(Watcher(cr, c[0]));
+
     if (c.learnt()) learnts_literals += c.size();
     else            clauses_literals += c.size(); }
 
@@ -226,11 +273,22 @@ void Solver::attachClause(CRef cr) {
 void Solver::detachClause(CRef cr, bool strict) {
     const Clause& c = ca[cr];
     assert(c.size() > 1);
-    
+
+	if (c.size() > 2) {
+		remove(watches[~c[2]], Watcher(cr, c[0]));
+		if (value(c[2]) == l_False) { // Assuming invariant holds!
+			to_prop[toInt(c[0])]--;
+			to_prop[toInt(c[1])]--;
+		}
+	}
+	else {
+		to_prop[toInt(c[0])]--;
+		to_prop[toInt(c[1])]--;
+	}
+
 	if (strict) {
 		remove(watches[~c[0]], Watcher(cr, c[1])); // Watcher equality doesn't depend on blockers!
 		remove(watches[~c[1]], Watcher(cr, c[0]));
-		if (c.size() > 2) remove(watches[~c[2]], Watcher(cr, c[0]));
     }else{
         // Lazy detaching: (NOTE! Must clean all watcher lists before garbage collecting this clause)
         watches.smudge(~c[0]);
@@ -260,6 +318,8 @@ bool Solver::satisfied(const Clause& c) const {
 
 
 // Revert to the state at given level (keeping all assignment at 'level' but not beyond).
+// Note that the new invariant specified at propagate() is preserved
+// We decrement to_prop[] where appropriate
 //
 void Solver::cancelUntil(int level) {
     if (decisionLevel() > level){
@@ -289,12 +349,27 @@ void Solver::cancelUntil(int level) {
                 total_actual_rewards[x] += reward;
                 total_actual_count[x] ++;
             }
+
+
 #if ANTI_EXPLORATION
             canceled[x] = conflicts;
 #endif
             assigns [x] = l_Undef;
+			assign_order[x] = INT_MAX;
+
+#if PROP_STATS
+			for (Watcher* w = (Watcher*)watches[l], *end = w + watches[l].size(); w != end; w++) {
+				Clause& c = ca[w->cref];
+				Lit c0 = c[0], c1 = c[1], c2 = c[2];
+				if (l_Undef == value(c2) && l_Undef == value(c1) && l_Undef == value(c0)) {
+					if (c0 != l) to_prop[toInt(c0)]--;
+					if (c1 != l) to_prop[toInt(c1)]--;
+					if (c2 != l) to_prop[toInt(c2)]--;
+				}
+			}
+#endif
             if (phase_saving > 1 || (phase_saving == 1) && c > trail_lim.last())
-                polarity[x] = sign(trail[c]);
+                polarity[x] = sign(l);
             insertVarOrder(x); }
         qhead = trail_lim[level];
         trail.shrink(trail.size() - trail_lim[level]);
@@ -360,8 +435,10 @@ Lit Solver::pickBranchLit()
 |        rest of literals. There may be others from the same level though.
 |  
 |________________________________________________________________________________________________@*/
-void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
+void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
 {
+	CRef confl = conf;
+	if (verbosity >= 3 && confl == CRef_Undef) printf("analyze called with CRef_Undef.\n");
     int pathC = 0;
     Lit p     = lit_Undef;
 
@@ -393,17 +470,29 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
 #endif
                 conflicted[var(q)]++;
                 seen[var(q)] = 1;
-                if (level(var(q)) >= decisionLevel())
-                    pathC++;
-                else
-                    out_learnt.push(q);
+				if (level(var(q)) >= decisionLevel()) {
+					if (verbosity >= 3) printf("   Queuing Lit %d (Var %d) at level %d.\n", q, var(q), level(var(q)));
+					pathC++;
+				}
+				else {
+					if (verbosity >= 3) printf("   ADDING Lit %d at level %d.\n", q, level(var(q)));
+					out_learnt.push(q);
+				}
             }
         }
         
         // Select next clause to look at:
         while (!seen[var(trail[index--])]);
         p     = trail[index+1];
+		if (verbosity >= 3) printf("UNFOLDING Lit %d (Var %d) to clause ", p, var(p));
         confl = reason(var(p));
+		if (verbosity >= 3) {
+			if (confl == CRef_Undef) printf("CRef_Undef!\n");
+			else {
+				printf("%d:", confl);
+				printClause(confl, ca[confl]);
+			}
+		}
         seen[var(p)] = 0;
         pathC--;
 
@@ -418,6 +507,7 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         uint32_t abstract_level = 0;
         for (i = 1; i < out_learnt.size(); i++)
             abstract_level |= abstractLevel(var(out_learnt[i])); // (maintain an abstraction of levels involved in conflict)
+		// abstract_level records bitwise those levels (up to 32) which variables in out_learnt are decided at
 
         for (i = j = 1; i < out_learnt.size(); i++)
             if (reason(var(out_learnt[i])) == CRef_Undef || !litRedundant(out_learnt[i], abstract_level))
@@ -460,6 +550,8 @@ void Solver::analyze(CRef confl, vec<Lit>& out_learnt, int& out_btlevel)
         out_learnt[1]     = p;
         out_btlevel       = level(var(p));
     }
+	// if (verbosity >= 3) printf("* Clause %d (length %d) conflicted at level %d, learning\n     clause of length %d and backtracking to level %d.\n", conf, ca[conf].size(), decisionLevel(), out_learnt.size(), out_btlevel);
+
 
 #if ALMOST_CONFLICT
     seen[var(p)] = true;
@@ -572,6 +664,7 @@ void Solver::uncheckedEnqueue(Lit p, CRef from)
     almost_conflicted[var(p)] = 0;
 #endif
     assigns[var(p)] = lbool(!sign(p));
+	assign_order[var(p)] = trail.size() + 1;
     vardata[var(p)] = mkVarData(from, decisionLevel());
     trail.push_(p);
 }
@@ -588,6 +681,14 @@ void Solver::uncheckedEnqueue(Lit p, CRef from)
 |    Post-conditions:
 |      * the propagation queue is empty, even if there was a conflict.
 |________________________________________________________________________________________________@*/
+/*
+New invariant for (3)-watches:
+If any unsatisfied clause has one or more of its watched literals set to false,
+then: all of its unwatched literals are also false, its unwatched literals precede
+its watched literals in the decision trail, and c[2] is the earliest assignment of the watched literals
+*/
+
+// TODO: Reduce to_prop when a clause becomes satisfied
 CRef Solver::propagate()
 {
     CRef    confl     = CRef_Undef;
@@ -600,29 +701,37 @@ CRef Solver::propagate()
         Watcher        *i, *j, *end;
         num_props++;
 
+		if (verbosity >= 3) printf("---> %d (%d)\n", p, var(p));
+
 		// watches[lit] tracks occurences of ~lit, so ws tracks occurences of ~p (which is FALSE)
         for (i = j = (Watcher*)ws, end = i + ws.size();  i != end;){
             // Try to avoid inspecting the clause:
-            Lit blocker = i->blocker;
+            /*Lit blocker = i->blocker;
             if (value(blocker) == l_True){
-                *j++ = *i++; continue; }
+                *j++ = *i++; continue; }*/
 
-            
+
             CRef     cr        = i->cref;
             Clause&  c         = ca[cr];
-            Lit      false_lit = ~p;
+            Lit      lf = ~p; // literal set to false
+
+			if (verbosity >= 3) {
+				printf("*WC %d", cr);
+				if (78 == cr) detailClause(cr, c);
+				else printClause(cr, c);
+			}
 
 			if (c.size() == 2) {
 				// Make sure the false literal is data[1] WHY???
-				if (c[0] == false_lit)
-					c[0] = c[1], c[1] = false_lit;
-				assert(c[1] == false_lit);
+				if (c[0] == lf)
+					c[0] = c[1], c[1] = lf;
+				assert(c[1] == lf);
 				Lit first = c[0];
 				i++;
 				*j++ = Watcher(cr, first);
 
 				// If 0th watch is true, then clause is already satisfied.
-				if (first != blocker && value(first) == l_True) continue;
+				if (value(first) == l_True) continue;
 
 				if (value(first) == l_False) {
 					confl = cr;
@@ -632,60 +741,87 @@ CRef Solver::propagate()
 						*j++ = *i++;
 				}
 				else
+					if (verbosity >= 3) printf("Unit %d (%d) :\n", first, var(first));
 					uncheckedEnqueue(first, cr);
 			} else {
-				// Make sure the false literal is data[2] WHY???
-				if (c[0] == false_lit)
-					c[0] = c[2], c[2] = false_lit;
-				else if (c[1] == false_lit)
-					c[1] = c[2], c[2] = false_lit;
-				/*else if (c[2] != false_lit) {
-					for (int i = 3; i < c.size(); i++) if (c[i] == false_lit) {
-						printf("false_lit is c[%d]!\n", i);
-						break;
-					}
-					printf("Here we are?\n");
-				}*/
-				assert(c[2] == false_lit);
+				// MAINTAIN INVARIANT: if any watch is false, c[2] is the oldest assignment amongst the 3 watched literals
+
 				i++;
 
+				int fi; // index of current false lit
+				int i0; // index of first other watch
+				int i1; // index of second other watch
+				if (c[0] == lf) fi = 0, i0 = 1, i1 = 2;
+				else if (c[1] == lf) fi = 1, i0 = 0, i1 = 2;				
+				else if (c[2] == lf) fi = 2, i0 = 0, i1 = 1;
+				else {
+					printf("Watched literal %d isn't among first 3 in clause %d!\n", lf, cr);
+					printClause(cr, c);
+					assert(false);
+				}
+				Lit l0 = c[i0], l1 = c[i1];
+				lbool v0 = value(l0), v1 = value(l1);
+
 				// If 0th or 1st watch is true, then clause is already satisfied.
-				Lit first = c[0], second = c[1];
-				lbool v0 = value(first), v1 = value(second);
-				if (v0 == l_True) { // if first == blocker then we already know value(first) != l_True
-					*j++ = Watcher(cr, first);
+				// May have to reorder literals to preserve invariant
+				if (v0 == l_True) {
+					if (fi == 2) { // No other watches are false, so move l0 == true to c[2]
+						c[2] = l0;
+						c[i0] = lf;
+					} else if (value(c[2]) == l_Undef) { //  No other watches are false, so move l0 == true to c[2]
+						c[2] = l0;
+						c[i0] = l1;
+					}
+					*j++ = Watcher(cr, l0); // lf is still in c[0..2], so include this clause in watches[p]
 					continue;
 				}
 				else if (v1 == l_True) {
-					*j++ = Watcher(cr, second);
+					if (fi == 2) {
+						c[2] = l1;
+						c[i1] = lf;
+					}
+					/*else if (value(c[2]) == l_Undef) {
+						c[2] = l1;
+						c[i1] = l0;
+					}*/
+					*j++ = Watcher(cr, l1); // lf is still in c[0..2], so include this clause in watches[p]
 					continue;
 				}
-				Watcher w = Watcher(cr, first);
 
-				// Look for new watch:
-				for (int k = 3; k < c.size(); k++)
-					if (value(c[k]) != l_False) {
-						c[2] = c[k]; c[k] = false_lit;
-						watches[~c[2]].push(w);
-						goto NextClause;
-					}
+				Watcher w = Watcher(cr, l0);
+				if (v0 == l_Undef && v1 == l_Undef) { //
+					// Look for new watch:
+					for (int k = 3; k < c.size(); k++)
+						if (value(c[k]) != l_False) {
+							c[fi] = c[k]; c[k] = lf;
+							watches[~c[fi]].push(w); // new literal in first 3, so add this clause to watches of (negation of) this literal
+							goto NextClause; // lf is no longer in first 3, so we don't increment j, and will overwrite this clause in watches[p]
+						} // TODO: Separate l_True and l_Undef cases to get a better blocker
 
-				// Did not find watch 
+					// Did not find watch 
+					// Make sure current literal is at c[2]
+					if (fi != 2) c[2] = lf, c[fi] = l1;
+					*j++ = w;
+					to_prop[toInt(l0)]++;
+					to_prop[toInt(l1)]++;
+					continue;
+				}
 				*j++ = w;
 
-
-				if (v0 == l_Undef && v1 == l_Undef) {
-					to_prop[toInt(first)]++;
-					to_prop[toInt(second)]++;
-					continue;
-				}
-
-				// clause is unit under assignment:
-				if (v0 == l_False ) {
+				// By the invariant, clause is unit under assignment:
+				// (Invariant is automatically preserved, by induction)
+				// * Must make sure propagating literal is c[0]!
+				if (v0 == l_False) {
 					if (v1 == l_Undef) {
-						// second literal is forced to be true
-						c[0] = second, c[1] = first; // Unnecessary ???
-						uncheckedEnqueue(second, cr); 
+						// l1 is forced to be true
+						if (i1 != 0) { // Making sure propagator is c[0]
+							Lit t = c[0];
+							c[0] = l1, c[i1] = t; 
+						}
+						if (verbosity >= 3) {
+							printf("Unit %d (%d) :\n", l1, var(l1));
+						}
+						uncheckedEnqueue(l1, cr); 
 					} else {
 						// this clause is a conflict
 						confl = cr;
@@ -695,8 +831,18 @@ CRef Solver::propagate()
 							* j++ = *i++;
 					}
 				}
-				else
-					uncheckedEnqueue(first, cr);
+				else {
+					// l0 is forced to be true
+					if (i0 != 0) { // Making sure propagator is c[0]
+						Lit t = c[0];
+						c[0] = l0, c[i0] = t;
+					}
+						if (verbosity >= 3) {
+							printf("Unit %d (%d) :\n", l0, var(l0));
+							printClause(cr, c);
+						}
+						uncheckedEnqueue(l0, cr);
+				}
 			}
         NextClause:;
         }
@@ -710,6 +856,32 @@ CRef Solver::propagate()
 
 int min(int a, int b) {
     return a < b ? a : b;
+}
+
+// Diagnostic:
+inline bool Solver::detailClause(CRef cr, Clause& c, int maxlength) {
+	if (c.learnt()) printf("  L ");
+	else printf("  C ");
+	if (c.size() > maxlength) {
+		printf("\n");
+		return false;
+	}
+	printf("{ ", cr);
+	for (int n = 0; n < c.size(); n++) {
+		vec<Watcher> &ws = watches[~c[n]];
+		for (int i = 0; i < ws.size(); i++) {
+			if (ws[i].cref == cr) {
+				printf("w");
+				continue;
+			}
+		}
+		if (value(c[n]) == l_True) printf("+");
+		else if (value(c[n]) == l_False) printf("-");
+		else printf(".");
+		printf("%d ", c[n]);
+	}
+	printf("}\n");
+	return true;
 }
 
 /*_________________________________________________________________________________________________
@@ -863,12 +1035,18 @@ lbool Solver::search(int nof_conflicts)
 #endif
         if (confl != CRef_Undef){
             // CONFLICT
+			if (verbosity >= 3) {
+				printf("Clause %d is a conflict at level %d:\n", confl, decisionLevel());
+				Clause& c = ca[confl];
+				printClause(confl, c);
+			}
             conflicts++; conflictC++;
 #if BRANCHING_HEURISTIC == CHB || BRANCHING_HEURISTIC == LRB
             if (step_size > min_step_size)
                 step_size -= step_size_dec;
 #endif
-            if (decisionLevel() == 0) return l_False;
+			
+			if (decisionLevel() == 0) { printf("Returning l_False because conflict at decision level 0.\n"); return l_False; }
 
             learnt_clause.clear();
             analyze(confl, learnt_clause, backtrack_level);
@@ -880,18 +1058,26 @@ lbool Solver::search(int nof_conflicts)
 #endif
 
             if (learnt_clause.size() == 1){
-                uncheckedEnqueue(learnt_clause[0]);
+				if (verbosity >= 3) {
+					printf("   Learning { %d }, backtracking to level %d:\n", learnt_clause[0], backtrack_level);
+				}
+				uncheckedEnqueue(learnt_clause[0]);
             }else{
                 CRef cr = ca.alloc(learnt_clause, true);
+				Clause& clause = ca[cr];
+				if (verbosity >= 3) {
+					printf("   Learning conflict clause, backtracking to level %d:\n", backtrack_level);
+					printClause(cr, clause);
+				}
                 learnts.push(cr);
                 attachClause(cr);
 #if LBD_BASED_CLAUSE_DELETION
-                Clause& clause = ca[cr];
+                
                 clause.activity() = lbd(clause);
 #else
                 claBumpActivity(ca[cr]);
 #endif
-                uncheckedEnqueue(learnt_clause[0], cr);
+                uncheckedEnqueue(learnt_clause[0], cr); // learnt_clause has not been sorted to the invariant yet, learnt_clause[0] is propagating by construction
             }
 
 #if BRANCHING_HEURISTIC == VSIDS
@@ -924,8 +1110,10 @@ lbool Solver::search(int nof_conflicts)
                 return l_Undef; }
 
             // Simplify the set of problem clauses:
-            if (decisionLevel() == 0 && !simplify())
-                return l_False;
+			if (decisionLevel() == 0 && !simplify()) {
+				printf("Returning l_False because no conflict returned, but !simplify() failed.\n");
+				return l_False;
+			}
 
             if (learnts.size()-nAssigns() >= max_learnts) {
                 // Reduce the set of learnt clauses:
@@ -966,6 +1154,7 @@ lbool Solver::search(int nof_conflicts)
 #if BRANCHING_HEURISTIC == CHB
             action = trail.size();
 #endif
+			if (verbosity >= 3) printf("DECIDE LEVEL %d : Lit %d (Var %d)\n", decisionLevel(), next, var(next));
             uncheckedEnqueue(next);
         }
     }

@@ -219,6 +219,7 @@ protected:
     vec<VarData>        vardata;          // Stores reason and level for each variable.
 #if PROP_STATS
 	vec<int>            to_prop;          // Number of direct propagations each literal will cause if set to false
+	vec<int>			assign_order;	  // Order in which variable was assigned. INT_MAX if unassigned
 #endif
 	int                 qhead;            // Head of queue (as index into the trail -- no more explicit propagation queue in MiniSat).
     int                 simpDB_assigns;   // Number of top-level assignments since last execution of 'simplify()'.
@@ -310,6 +311,10 @@ protected:
     double   progressEstimate ()      const; // DELETE THIS ?? IT'S NOT VERY USEFUL ...
     bool     withinBudget     ()      const;
 
+	// Diagnostic
+	bool     printClause(CRef cr, Clause& c, int maxlength = 20);
+	bool     detailClause(CRef cr, Clause& c, int maxlength = 20);
+
     // Static helpers:
     //
 
@@ -328,6 +333,18 @@ protected:
 
 //=================================================================================================
 // Implementation of inline methods:
+
+inline bool Solver::printClause(CRef cr, Clause& c, int maxlength) {
+	if (c.size() > maxlength) {
+		printf("\n");
+		return false;
+	}
+	printf("     { ", cr);
+	for (int n = 0; n < c.size(); n++) printf("%d ", c[n]);
+	printf("}\n");
+	return true;
+}
+
 
 inline CRef Solver::reason(Var x) const { return vardata[x].reason; }
 inline int  Solver::level (Var x) const { return vardata[x].level; }

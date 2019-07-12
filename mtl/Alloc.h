@@ -60,7 +60,7 @@ class RegionAllocator
     void     free      (int size)    { wasted_ += size; }
 
     // Deref, Load Effective Address (LEA), Inverse of LEA (AEL):
-    T&       operator[](Ref r)       { assert(r >= 0 && r < sz); return memory[r]; }
+	T& operator[](Ref r) { assert(r >= 0); assert(r < sz); return memory[r]; }
     const T& operator[](Ref r) const { assert(r >= 0 && r < sz); return memory[r]; }
 
     T*       lea       (Ref r)       { assert(r >= 0 && r < sz); return &memory[r]; }
