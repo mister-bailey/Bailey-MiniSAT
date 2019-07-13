@@ -312,8 +312,8 @@ protected:
     bool     withinBudget     ()      const;
 
 	// Diagnostic
-	bool     printClause(CRef cr, Clause& c, int maxlength = 20);
-	bool     detailClause(CRef cr, Clause& c, int maxlength = 20);
+	bool     printClause(CRef cr, Clause& c, int maxlength = 50);
+	bool     detailClause(CRef cr, Clause& c, int maxlength = 50);
 
     // Static helpers:
     //
@@ -335,6 +335,7 @@ protected:
 // Implementation of inline methods:
 
 inline bool Solver::printClause(CRef cr, Clause& c, int maxlength) {
+	if (verbosity >= 4) return detailClause(cr, c, maxlength);
 	if (c.size() > maxlength) {
 		printf("\n");
 		return false;

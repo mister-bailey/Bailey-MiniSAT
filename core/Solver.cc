@@ -209,7 +209,10 @@ bool Solver::addClause_(vec<Lit>& ps)
 
 // watches[lit] tracks occurences of ~lit 
 void Solver::attachClause(CRef cr) {
-    const Clause& c = ca[cr];
+	/*if (6411 == cr) {
+		printf("PROBLEM CLAUSE!\n");
+	}*/
+    /*const*/ Clause& c = ca[cr];
     assert(c.size() > 1);
 	if (c.size() > 2) {
 		if (c.learnt()) { // some variables in this clause may already be assigned. Must sort to invariant!
@@ -354,17 +357,22 @@ void Solver::cancelUntil(int level) {
 #if ANTI_EXPLORATION
             canceled[x] = conflicts;
 #endif
-            assigns [x] = l_Undef;
+            
 			assign_order[x] = INT_MAX;
 
+			if (assigns[x] != l_Undef) {
+				assigns[x] = l_Undef;
+
 #if PROP_STATS
-			for (Watcher* w = (Watcher*)watches[l], *end = w + watches[l].size(); w != end; w++) {
-				Clause& c = ca[w->cref];
-				Lit c0 = c[0], c1 = c[1], c2 = c[2];
-				if (l_Undef == value(c2) && l_Undef == value(c1) && l_Undef == value(c0)) {
-					if (c0 != l) to_prop[toInt(c0)]--;
-					if (c1 != l) to_prop[toInt(c1)]--;
-					if (c2 != l) to_prop[toInt(c2)]--;
+				for (Watcher* w = (Watcher*)watches[l], *end = w + watches[l].size(); w != end; w++) {
+					Clause& c = ca[w->cref];
+					if (c.size() == 2) continue;
+					Lit c0 = c[0], c1 = c[1], c2 = c[2];
+					if (l_Undef == value(c2) && l_Undef == value(c1) && l_Undef == value(c0)) {
+						if (c0 != l) to_prop[toInt(c0)]--;
+						if (c1 != l) to_prop[toInt(c1)]--;
+						if (c2 != l) to_prop[toInt(c2)]--;
+					}
 				}
 			}
 #endif
@@ -448,7 +456,15 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
     int index   = trail.size() - 1;
 
     do{
-        assert(confl != CRef_Undef); // (otherwise should be UIP)
+		if (confl == CRef_Undef) {
+			if (verbosity >= 1) {
+				printf("* Trail length: %d\n", trail.size());
+				printf("* Decision level %d:  %d -- %d\n", decisionLevel(), trail_lim[decisionLevel()-1], trail.size()-1);
+				printf("* Decision Literal %d (Var %d)\n", trail[trail_lim[decisionLevel()-1]], var(trail[trail_lim[decisionLevel()-1]]));
+				printf("* -- While unfolding Literal %d (Var %d)\n", p, var(p));
+			}
+			assert(confl != CRef_Undef); // (otherwise should be UIP)
+		}
         Clause& c = ca[confl];
 
 #if LBD_BASED_CLAUSE_DELETION
@@ -471,11 +487,11 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
                 conflicted[var(q)]++;
                 seen[var(q)] = 1;
 				if (level(var(q)) >= decisionLevel()) {
-					if (verbosity >= 3) printf("   Queuing Lit %d (Var %d) at level %d.\n", q, var(q), level(var(q)));
+					if (verbosity >= 3) printf("   Queuing Lit %d (Var %d) at level %d, index %d.\n", q, var(q), level(var(q)), assign_order[var(q)]);
 					pathC++;
 				}
 				else {
-					if (verbosity >= 3) printf("   ADDING Lit %d at level %d.\n", q, level(var(q)));
+					if (verbosity >= 3) printf("   ADDING Lit %d at level %d, index %d.\n", q, level(var(q)), assign_order[var(q)]);
 					out_learnt.push(q);
 				}
             }
@@ -484,9 +500,9 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
         // Select next clause to look at:
         while (!seen[var(trail[index--])]);
         p     = trail[index+1];
-		if (verbosity >= 3) printf("UNFOLDING Lit %d (Var %d) to clause ", p, var(p));
         confl = reason(var(p));
 		if (verbosity >= 3) {
+			printf("PathC = %d; UNFOLDING Lit %d (Var %d) to clause ", pathC, p, var(p));
 			if (confl == CRef_Undef) printf("CRef_Undef!\n");
 			else {
 				printf("%d:", confl);
@@ -647,7 +663,9 @@ void Solver::analyzeFinal(Lit p, vec<Lit>& out_conflict)
 
 void Solver::uncheckedEnqueue(Lit p, CRef from)
 {
+	lbool val = value(p);
     assert(value(p) == l_Undef);
+	if (assign_order[var(p)] != INT_MAX) return;
     picked[var(p)] = conflicts;
 #if ANTI_EXPLORATION
     uint64_t age = conflicts - canceled[var(p)];
@@ -663,10 +681,14 @@ void Solver::uncheckedEnqueue(Lit p, CRef from)
 #if ALMOST_CONFLICT
     almost_conflicted[var(p)] = 0;
 #endif
-    assigns[var(p)] = lbool(!sign(p));
+	// Value assignment now takes place during propagate step!
+    // assigns[var(p)] = lbool(!sign(p));
 	assign_order[var(p)] = trail.size() + 1;
     vardata[var(p)] = mkVarData(from, decisionLevel());
     trail.push_(p);
+	/*if (verbosity >= 3 && var(p) == 380) {
+		printf("Problem variable 380 is propagating!");
+	}*/
 }
 
 
@@ -701,6 +723,9 @@ CRef Solver::propagate()
         Watcher        *i, *j, *end;
         num_props++;
 
+		// Assignment now happens just before propagation!
+		assigns[var(p)] = lbool(!sign(p));
+
 		if (verbosity >= 3) printf("---> %d (%d)\n", p, var(p));
 
 		// watches[lit] tracks occurences of ~lit, so ws tracks occurences of ~p (which is FALSE)
@@ -731,18 +756,21 @@ CRef Solver::propagate()
 				*j++ = Watcher(cr, first);
 
 				// If 0th watch is true, then clause is already satisfied.
-				if (value(first) == l_True) continue;
+				lbool vall = value(first);
 
-				if (value(first) == l_False) {
+				if (vall == l_True) continue;
+
+				if (vall == l_False) {
 					confl = cr;
 					qhead = trail.size();
 					// Copy the remaining watches:
 					while (i < end)
 						*j++ = *i++;
 				}
-				else
+				else {
 					if (verbosity >= 3) printf("Unit %d (%d) :\n", first, var(first));
 					uncheckedEnqueue(first, cr);
+				}
 			} else {
 				// MAINTAIN INVARIANT: if any watch is false, c[2] is the oldest assignment amongst the 3 watched literals
 
@@ -1041,6 +1069,7 @@ lbool Solver::search(int nof_conflicts)
 				printClause(confl, c);
 			}
             conflicts++; conflictC++;
+			
 #if BRANCHING_HEURISTIC == CHB || BRANCHING_HEURISTIC == LRB
             if (step_size > min_step_size)
                 step_size -= step_size_dec;
@@ -1066,17 +1095,22 @@ lbool Solver::search(int nof_conflicts)
                 CRef cr = ca.alloc(learnt_clause, true);
 				Clause& clause = ca[cr];
 				if (verbosity >= 3) {
-					printf("   Learning conflict clause, backtracking to level %d:\n", backtrack_level);
+					printf("   Learning conflict clause %d, backtracking to level %d:\n", cr, backtrack_level);
 					printClause(cr, clause);
 				}
                 learnts.push(cr);
                 attachClause(cr);
+				if (verbosity >= 3) {
+					printf("   Sorted clause %d:",cr);
+					printClause(cr, clause);
+				}
 #if LBD_BASED_CLAUSE_DELETION
                 
                 clause.activity() = lbd(clause);
 #else
                 claBumpActivity(ca[cr]);
 #endif
+				//assert(value(learnt_clause[0]) == l_Undef);
                 uncheckedEnqueue(learnt_clause[0], cr); // learnt_clause has not been sorted to the invariant yet, learnt_clause[0] is propagating by construction
             }
 
@@ -1261,13 +1295,20 @@ lbool Solver::solve_()
 
 bool Solver::verify()
 {
+	if (verbosity >= 1) printf("*** Verifying %d clauses...\n", clauses.size());
 	for (int i = 0; i < clauses.size(); i++) {
 		Clause& c = ca[clauses[i]];
+		//if (verbosity >= 2) printf("    Clause %d, size %d...", clauses[i], c.size());
 		for (int j = 0; j < c.size(); j++) {
-			if (modelValue(c[j]) == l_True) goto ClauseSatisfied;
+			if (modelValue(c[j]) == l_True) {
+				//if (verbosity >= 2) printf("SAT! by Lit %d (Var %d)\n", c[j], var(c[j]));
+				goto ClauseSatisfied;
+			}
 		}
+		//if (verbosity >= 2) printf("\n");
 		return false;
-		ClauseSatisfied:;
+	ClauseSatisfied:;
+		
 	}
 	return true;
 }
