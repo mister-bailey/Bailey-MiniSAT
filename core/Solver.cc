@@ -95,6 +95,7 @@ Solver::Solver() :
     //
   , learntsize_adjust_start_confl (100)
   , learntsize_adjust_inc         (1.5)
+  , prob_sharp (1.5)
 
     // Statistics: (formerly in 'SolverStats')
     //
@@ -1286,7 +1287,7 @@ lbool Solver::solve_()
     }else if (status == l_False && conflict.size() == 0)
         ok = false;
 
-    cancelUntil(0);
+    // cancelUntil(0); // We want all the info!
     return status;
 }
 
@@ -1311,6 +1312,110 @@ bool Solver::verify()
 		
 	}
 	return true;
+}
+
+//======================================================
+// Compute probability
+// 
+
+//======================================================
+// Analyzes the model to test a probability metric
+// Useful for tuning the metric and its parameters
+//
+// Precondition: Clauses are all sorted according to the invariant, with appropriate watch lists.
+//      In other words, solver state is as it should be at the end of the search.
+// Does not work with "assumptions".
+//
+void Solver::analyzeProbabilities() {
+	int n = nVars();
+	assert(n = trail.size());
+
+	// clearing to_prop and assigns
+	for (int i = 0; i < n; i++) {
+		to_prop[toInt(mkLit(Var(i)))] = 0;
+		to_prop[toInt(~mkLit(Var(i)))] = 0;
+		assigns[i] = l_Undef;
+	}
+
+	// bins for statistics (how many trues and falses were estimated for each probability range)
+	// [0-.1, .1-.2, ..., .9-1]
+	// * WEIGHTED by amount of info
+	int trues[10] = { 0,0,0,0,0,0,0,0,0,0 };
+	int falses[10] = { 0,0,0,0,0,0,0,0,0,0 };
+	int weights[10] = { 0,0,0,0,0,0,0,0,0,0 };
+
+	// assigns[var(p)] = lbool(!sign(p));
+
+	// size-2 clauses dealt with first:
+	for (int i = 0; i < clauses.size(); i++) {
+		CRef cr = clauses[i];
+		Clause& c = ca[cr];
+		if (c.size() == 2) {
+			to_prop[toInt(c[0])]++;
+			to_prop[toInt(c[1])]++;
+		}
+	}
+
+	// Going in order of the actual solution trail
+	// But you could try a randomized order (or an ensemble of orders)
+	// Currently computes probabilities only once per decision level
+	// But you could compute them after each assignment
+	for (int i = 0, level = 0; i < n; i++) {
+
+		if (i == trail_lim[level]) {
+			// Compute statistics
+			//printf("Level %d\n", level);
+			for (int i = 0; i < n; i++) {
+				if (assigns[i] != l_Undef) continue;
+				Var v = Var(i);
+				Lit lp = mkLit(v), ln = ~lp;
+				// compute probability:
+				int np = to_prop[toInt(lp)];
+				int nn = to_prop[toInt(ln)];
+				double ep = pow(2, np);
+				double en = pow(2, nn);
+				double prob = (ep - .5) / (ep + en - 1.0);
+
+				// put instance in the right bin:
+				int bin = (int)(prob * 10);
+				if (bin == 10) bin = 9;
+				if (model[i] == l_True) trues[bin] += np + nn;
+				else falses[bin] += np + nn;
+				weights[bin] += np + nn;
+			}
+
+			level++;
+		}
+
+		Lit lit = trail[i], flit = ~lit;
+		Var v = var(lit);
+		Watcher* w, * end;
+		vec<Watcher>& ws = watches[lit];
+		for (w = (Watcher*)ws, end = w + ws.size(); w != end; w++) {
+			CRef cr = w->cref;
+			Clause& c = ca[cr];
+
+			if (c.size() > 2 && c[2] == flit) {
+				to_prop[toInt(c[0])]++;
+				to_prop[toInt(c[1])]++;
+			}
+
+
+		}
+
+	}
+	// Print analysis
+	printf("*****************************************\n");
+	printf(" Probability analysis\n");
+	printf(" Heuristic evaluated at each decision level,\n    problem clauses only, equally weighted\n\n");
+	printf(" Bin range    Frequency    Number of hits\n");
+	for (int i = 0; i < 10; i++) {
+		printf(" %1.1f - %1.1f", (1.0 * i) / 10.0, (1.0 * i + 1) / 10.0);
+		if (weights[i] == 0) printf("       --- ");
+		else printf("      %3.3f", trues[i] * 1.0 / weights[i]);
+		printf("        %d\n", weights[i]);
+	}
+
 }
 
 //=================================================================================================

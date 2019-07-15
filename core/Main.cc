@@ -174,6 +174,7 @@ int main(int argc, char** argv)
 			printf("Verifying the model...\n");
 			if (S.verify()) printf("MODEL VERIFIED!\n");
 			else printf("MODEL ERROR!\n");
+			S.analyzeProbabilities();
 		}
         if (res != NULL){
             if (ret == l_True){

@@ -105,9 +105,12 @@ public:
     void    checkGarbage(double gf);
     void    checkGarbage();
 
-	// Verifying the result:
+	// Verifying/analyzing the model:
 	//
 	bool verify();
+	void analyzeProbabilities();
+	double prob_sharp; // Sharpness of the probability estimates, i.e., what base is used in the exponential
+
 
     // Extra results: (read-only member variable)
     //
