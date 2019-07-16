@@ -27,6 +27,8 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #include "utils/Options.h"
 #include "core/SolverTypes.h"
 
+#include <algorithm>
+
 
 namespace Minisat {
 
@@ -196,11 +198,20 @@ protected:
         bool operator()(const Watcher& w) const { return ca[w.cref].mark() == 1; }
     };
 
-    struct VarOrderLt {
+    /*struct VarOrderLt {
         const vec<double>&  activity;
         bool operator () (Var x, Var y) const { return activity[x] > activity[y]; }
         VarOrderLt(const vec<double>&  act) : activity(act) { }
-    };
+    };*/
+	struct MinLitCmp {
+		const vec<int>& info;
+		bool operator () (Var x, Var y) const {
+			Lit xp = mkLit(x);
+			Lit yp = mkLit(y);
+			return std::min(info[toInt(xp)],info[toInt(~xp)]) > std::min(info[toInt(yp)], info[toInt(~yp)]);
+		}
+		MinLitCmp(const vec<int>& i) : info(i) {}
+	};
 
     // Solver state:
     //
@@ -228,8 +239,9 @@ protected:
     int                 simpDB_assigns;   // Number of top-level assignments since last execution of 'simplify()'.
     int64_t             simpDB_props;     // Remaining number of propagations that must be made before next execution of 'simplify()'.
     vec<Lit>            assumptions;      // Current set of assumptions provided to solve by the user.
-    Heap<VarOrderLt>    order_heap;       // A priority queue of variables ordered with respect to the variable activity.
-    double              progress_estimate;// Set by 'search()'.
+    //Heap<VarOrderLt>    order_heap;       // A priority queue of variables ordered with respect to the variable activity.
+	Heap<MinLitCmp>    order_heap;       // A priority queue of variables ordered with respect to the variable activity.
+	double              progress_estimate;// Set by 'search()'.
     bool                remove_satisfied; // Indicates whether possibly inefficient linear scan for satisfied clauses should be performed in 'simplify'.
 
     ClauseAllocator     ca;
@@ -256,6 +268,7 @@ protected:
     //
     void     insertVarOrder   (Var x);                                                 // Insert a variable in the decision order priority queue.
     Lit      pickBranchLit    ();                                                      // Return the next decision variable.
+	double   probability(Var v);     // Estimating the probability that v ends up true
     void     newDecisionLevel ();                                                      // Begins a new decision level.
     void     uncheckedEnqueue (Lit p, CRef from = CRef_Undef);                         // Enqueue a literal. Assumes value of literal is undefined.
     bool     enqueue          (Lit p, CRef from = CRef_Undef);                         // Test if fact 'p' contradicts current state, enqueue otherwise.
@@ -313,6 +326,9 @@ protected:
     int      level            (Var x) const;
     double   progressEstimate ()      const; // DELETE THIS ?? IT'S NOT VERY USEFUL ...
     bool     withinBudget     ()      const;
+
+	void     incrementProp(Lit l);
+	void     decrementProp(Lit l);
 
 	// Diagnostic
 	bool     printClause(CRef cr, Clause& c, int maxlength = 50);
@@ -384,6 +400,27 @@ inline void Solver::checkGarbage(void){ return checkGarbage(garbage_frac); }
 inline void Solver::checkGarbage(double gf){
     if (ca.wasted() > ca.size() * gf)
         garbageCollect(); }
+
+inline void Solver::incrementProp(Lit l) {
+	int nval = to_prop[toInt(l)]++;
+	Var v = var(l);
+	if (order_heap.inHeap(v)) {
+		if (sign(l) == false && nval <= to_prop[toInt(~l)])
+			order_heap.decrease(v);
+		else if (sign(l) == true && nval < to_prop[toInt(~l)])
+			order_heap.decrease(v);
+	}
+}
+inline void Solver::decrementProp(Lit l) {
+	int nval = to_prop[toInt(l)]--;
+	Var v = var(l);
+	if (order_heap.inHeap(v)) {
+		if (sign(l) == false && nval < to_prop[toInt(~l)])
+			order_heap.increase(v);
+		else if (sign(l) == true && nval <= to_prop[toInt(~l)])
+			order_heap.increase(v);
+	}
+}
 
 // NOTE: enqueue does not set the ok flag! (only public methods do)
 inline bool     Solver::enqueue         (Lit p, CRef from)      { return value(p) != l_Undef ? value(p) != l_False : (uncheckedEnqueue(p, from), true); }

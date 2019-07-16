@@ -119,7 +119,7 @@ Solver::Solver() :
   , qhead              (0)
   , simpDB_assigns     (-1)
   , simpDB_props       (0)
-  , order_heap         (VarOrderLt(activity))
+  , order_heap         (MinLitCmp(to_prop))
   , progress_estimate  (0)
   , remove_satisfied   (true)
 
@@ -258,14 +258,14 @@ void Solver::attachClause(CRef cr) {
 				if (li == INT_MAX) num_undef++;
 			}
 			if (value(c[2]) == l_False) {
-				to_prop[toInt(c[0])]++;
-				to_prop[toInt(c[1])]++;
+				incrementProp(c[0]);
+				incrementProp(c[1]);
 			}
 		}
 		watches[~c[2]].push(Watcher(cr, c[0]));
 	} else {
-		to_prop[toInt(c[0])]++;
-		to_prop[toInt(c[1])]++;
+		incrementProp(c[0]);
+		incrementProp(c[1]);
 	}
 	watches[~c[0]].push(Watcher(cr, c[1]));
 	watches[~c[1]].push(Watcher(cr, c[0]));
@@ -281,13 +281,13 @@ void Solver::detachClause(CRef cr, bool strict) {
 	if (c.size() > 2) {
 		remove(watches[~c[2]], Watcher(cr, c[0]));
 		if (value(c[2]) == l_False) { // Assuming invariant holds!
-			to_prop[toInt(c[0])]--;
-			to_prop[toInt(c[1])]--;
+			decrementProp(c[0]);
+			decrementProp(c[1]);
 		}
 	}
 	else {
-		to_prop[toInt(c[0])]--;
-		to_prop[toInt(c[1])]--;
+		decrementProp(c[0]);
+		decrementProp(c[1]);
 	}
 
 	if (strict) {
@@ -321,6 +321,8 @@ bool Solver::satisfied(const Clause& c) const {
     return false; }
 
 
+
+
 // Revert to the state at given level (keeping all assignment at 'level' but not beyond).
 // Note that the new invariant specified at propagate() is preserved
 // We decrement to_prop[] where appropriate
@@ -330,6 +332,7 @@ void Solver::cancelUntil(int level) {
         for (int c = trail.size()-1; c >= trail_lim[level]; c--){
 			Lit      l = trail[c];
             Var      x  = var(l);
+#if !PROP_STATS
             uint64_t age = conflicts - picked[x];
             if (age > 0) {
                 double reward = ((double) conflicted[x]) / ((double) age);
@@ -343,6 +346,7 @@ void Solver::cancelUntil(int level) {
 				// Trying out an alternative heuristic
                 activity[x] = step_size * adjusted_reward + ((1 - step_size) * old_activity);
 				//activity[x] = step_size * adjusted_reward + ((1 - step_size) * old_activity);
+
                 if (order_heap.inHeap(x)) {
                     if (activity[x] > old_activity)
                         order_heap.decrease(x);
@@ -358,6 +362,7 @@ void Solver::cancelUntil(int level) {
 #if ANTI_EXPLORATION
             canceled[x] = conflicts;
 #endif
+#endif
             
 			assign_order[x] = INT_MAX;
 
@@ -370,9 +375,9 @@ void Solver::cancelUntil(int level) {
 					if (c.size() == 2) continue;
 					Lit c0 = c[0], c1 = c[1], c2 = c[2];
 					if (l_Undef == value(c2) && l_Undef == value(c1) && l_Undef == value(c0)) {
-						if (c0 != l) to_prop[toInt(c0)]--;
-						if (c1 != l) to_prop[toInt(c1)]--;
-						if (c2 != l) to_prop[toInt(c2)]--;
+						if (c0 != l) decrementProp(c0);
+						if (c1 != l) decrementProp(c1);
+						if (c2 != l) decrementProp(c2);
 					}
 				}
 			}
@@ -424,7 +429,18 @@ Lit Solver::pickBranchLit()
         }
 
 	// MIKE : where they choose polarity
-    return next == var_Undef ? lit_Undef : mkLit(next, rnd_pol ? drand(random_seed) < 0.5 : polarity[next]);
+    //return next == var_Undef ? lit_Undef : mkLit(next, rnd_pol ? drand(random_seed) < 0.5 : polarity[next]);
+	return next == var_Undef ? lit_Undef : mkLit(next, drand(random_seed) > probability(next));
+}
+
+double Solver::probability(Var v) {
+	Lit lp = mkLit(v);
+	// compute probability:
+	int np = to_prop[toInt(lp)];
+	int nn = to_prop[toInt(~lp)];
+	double ep = pow(2, np);
+	double en = pow(2, nn);
+	return (ep - .5) / (ep + en - 1.0);
 }
 
 /*_________________________________________________________________________________________________
@@ -450,6 +466,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
 	if (verbosity >= 3 && confl == CRef_Undef) printf("analyze called with CRef_Undef.\n");
     int pathC = 0;
     Lit p     = lit_Undef;
+	out_btlevel = 0;
 
     // Generate conflict clause:
     //
@@ -459,6 +476,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
     do{
 		if (confl == CRef_Undef) {
 			if (verbosity >= 1) {
+				printf("**********************\n* Error: Unfolding CRef_Undef!\n");
 				printf("* Trail length: %d\n", trail.size());
 				printf("* Decision level %d:  %d -- %d\n", decisionLevel(), trail_lim[decisionLevel()-1], trail.size()-1);
 				printf("* Decision Literal %d (Var %d)\n", trail[trail_lim[decisionLevel()-1]], var(trail[trail_lim[decisionLevel()-1]]));
@@ -494,6 +512,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
 				else {
 					if (verbosity >= 3) printf("   ADDING Lit %d at level %d, index %d.\n", q, level(var(q)), assign_order[var(q)]);
 					out_learnt.push(q);
+					if (level(var(q)) > out_btlevel) out_btlevel = level(var(q));
 				}
             }
         }
@@ -515,6 +534,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
 
     }while (pathC > 0);
     out_learnt[0] = ~p;
+	if (level(var(p)) < out_btlevel) out_btlevel = level(var(p));
 
     // Simplify conflict clause:
     //
@@ -556,7 +576,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
     if (out_learnt.size() == 1)
         out_btlevel = 0;
     else{
-        int max_i = 1;
+        /*int max_i = 1;
         // Find the first literal assigned at the next-highest level:
         for (int i = 2; i < out_learnt.size(); i++)
             if (level(var(out_learnt[i])) > level(var(out_learnt[max_i])))
@@ -565,7 +585,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
         Lit p             = out_learnt[max_i];
         out_learnt[max_i] = out_learnt[1];
         out_learnt[1]     = p;
-        out_btlevel       = level(var(p));
+        out_btlevel       = level(var(p));*/
     }
 	// if (verbosity >= 3) printf("* Clause %d (length %d) conflicted at level %d, learning\n     clause of length %d and backtracking to level %d.\n", conf, ca[conf].size(), decisionLevel(), out_learnt.size(), out_btlevel);
 
@@ -831,8 +851,8 @@ CRef Solver::propagate()
 					// Make sure current literal is at c[2]
 					if (fi != 2) c[2] = lf, c[fi] = l1;
 					*j++ = w;
-					to_prop[toInt(l0)]++;
-					to_prop[toInt(l1)]++;
+					incrementProp(l0);
+					incrementProp(l1);
 					continue;
 				}
 				*j++ = w;
@@ -1307,16 +1327,17 @@ bool Solver::verify()
 			}
 		}
 		//if (verbosity >= 2) printf("\n");
+		if (verbosity >= 2) {
+			printf("Oops! Clause %d is unsatisfied!\n", clauses[i]);
+			printClause(clauses[i], c);
+		}
 		return false;
 	ClauseSatisfied:;
 		
 	}
 	return true;
 }
-
-//======================================================
-// Compute probability
-// 
+ 
 
 //======================================================
 // Analyzes the model to test a probability metric
@@ -1334,6 +1355,7 @@ void Solver::analyzeProbabilities() {
 	for (int i = 0; i < n; i++) {
 		to_prop[toInt(mkLit(Var(i)))] = 0;
 		to_prop[toInt(~mkLit(Var(i)))] = 0;
+		if (assigns[i] == l_Undef) printf("Oops! Var %d is unassigned!\n",i);
 		assigns[i] = l_Undef;
 	}
 
