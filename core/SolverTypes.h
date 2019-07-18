@@ -25,9 +25,14 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #define VSIDS 0
 #define CHB 1
 #define LRB 2
+#define PROP 3
+
+#ifndef PROP_STATS
+#define PROP_STATS true
+#endif
 
 #ifndef BRANCHING_HEURISTIC
-    #define BRANCHING_HEURISTIC LRB
+    #define BRANCHING_HEURISTIC PROP //LRB
 #endif
 
 #ifndef LBD_BASED_CLAUSE_DELETION
@@ -39,22 +44,20 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #endif
 
 #ifndef ALMOST_CONFLICT
-    #define ALMOST_CONFLICT true
+    #define ALMOST_CONFLICT false //true
 #endif
 #if ALMOST_CONFLICT && BRANCHING_HEURISTIC != LRB
     #error ALMOST_CONFLICT requires BRANCHING_HEURISTIC == LRB
 #endif
 
 #ifndef ANTI_EXPLORATION
-    #define ANTI_EXPLORATION true
+    #define ANTI_EXPLORATION false //true
 #endif
 #if ANTI_EXPLORATION && BRANCHING_HEURISTIC != LRB
     #error ANTI_EXPLORATION requires BRANCHING_HEURISTIC == LRB
 #endif
 
-#ifndef PROP_STATS
-	#define PROP_STATS true
-#endif
+
 
 #include <assert.h>
 

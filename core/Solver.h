@@ -221,8 +221,10 @@ protected:
 #if ! LBD_BASED_CLAUSE_DELETION
     double              cla_inc;          // Amount to bump next clause with.
 #endif
+#if !PROP_STATS
     vec<double>         activity;         // A heuristic measurement of the activity of a variable.
     double              var_inc;          // Amount to bump next variable with.
+#endif
     OccLists<Lit, vec<Watcher>, WatcherDeleted>
                         watches;          // 'watches[lit]' is a list of constraints watching 'lit' (will go there if literal becomes true).
     vec<lbool>          assigns;          // The current assignments.
@@ -240,7 +242,7 @@ protected:
     int64_t             simpDB_props;     // Remaining number of propagations that must be made before next execution of 'simplify()'.
     vec<Lit>            assumptions;      // Current set of assumptions provided to solve by the user.
     //Heap<VarOrderLt>    order_heap;       // A priority queue of variables ordered with respect to the variable activity.
-	Heap<MinLitCmp>    order_heap;       // A priority queue of variables ordered with respect to the variable activity.
+	Heap<MinLitCmp>    order_heap;       // A priority queue of variables ordered with respect to expected information
 	double              progress_estimate;// Set by 'search()'.
     bool                remove_satisfied; // Indicates whether possibly inefficient linear scan for satisfied clauses should be performed in 'simplify'.
 
@@ -327,6 +329,8 @@ protected:
     double   progressEstimate ()      const; // DELETE THIS ?? IT'S NOT VERY USEFUL ...
     bool     withinBudget     ()      const;
 
+	int      priority(Lit l) const;
+	int      priority(Var v) const;
 	void     incrementProp(Lit l);
 	void     decrementProp(Lit l);
 
@@ -404,23 +408,16 @@ inline void Solver::checkGarbage(double gf){
 inline void Solver::incrementProp(Lit l) {
 	int nval = to_prop[toInt(l)]++;
 	Var v = var(l);
-	if (order_heap.inHeap(v)) {
-		if (sign(l) == false && nval <= to_prop[toInt(~l)])
-			order_heap.decrease(v);
-		else if (sign(l) == true && nval < to_prop[toInt(~l)])
-			order_heap.decrease(v);
-	}
+	if (order_heap.inHeap(v) && nval < to_prop[toInt(~l)]) order_heap.decrease(v);
 }
 inline void Solver::decrementProp(Lit l) {
 	int nval = to_prop[toInt(l)]--;
 	Var v = var(l);
-	if (order_heap.inHeap(v)) {
-		if (sign(l) == false && nval < to_prop[toInt(~l)])
-			order_heap.increase(v);
-		else if (sign(l) == true && nval <= to_prop[toInt(~l)])
-			order_heap.increase(v);
-	}
+	if (order_heap.inHeap(v) && nval <= to_prop[toInt(~l)]) order_heap.increase(v);
 }
+inline int Solver::priority(Lit l) const { return std::min(to_prop[toInt(l)], to_prop[toInt(~l)]); }
+inline int Solver::priority(Var v) const { return priority(mkLit(v)); }
+
 
 // NOTE: enqueue does not set the ok flag! (only public methods do)
 inline bool     Solver::enqueue         (Lit p, CRef from)      { return value(p) != l_Undef ? value(p) != l_False : (uncheckedEnqueue(p, from), true); }

@@ -95,7 +95,7 @@ Solver::Solver() :
     //
   , learntsize_adjust_start_confl (100)
   , learntsize_adjust_inc         (1.5)
-  , prob_sharp (1.5)
+  //, prob_sharp (1.5)
 
     // Statistics: (formerly in 'SolverStats')
     //
@@ -150,8 +150,8 @@ Var Solver::newVar(bool sign, bool dvar)
     watches  .init(mkLit(v, true ));
     assigns  .push(l_Undef);
     vardata  .push(mkVarData(CRef_Undef, 0));
-    //activity .push(0);
-    activity .push(rnd_init_act ? drand(random_seed) * 0.00001 : 0);
+ 
+    //activity .push(rnd_init_act ? drand(random_seed) * 0.00001 : 0);
     seen     .push(0);
     polarity .push(sign);
     decision .push();
@@ -332,7 +332,7 @@ void Solver::cancelUntil(int level) {
         for (int c = trail.size()-1; c >= trail_lim[level]; c--){
 			Lit      l = trail[c];
             Var      x  = var(l);
-#if !PROP_STATS
+//#if !PROP_STATS
             uint64_t age = conflicts - picked[x];
             if (age > 0) {
                 double reward = ((double) conflicted[x]) / ((double) age);
@@ -362,7 +362,7 @@ void Solver::cancelUntil(int level) {
 #if ANTI_EXPLORATION
             canceled[x] = conflicts;
 #endif
-#endif
+//#endif
             
 			assign_order[x] = INT_MAX;
 
@@ -405,11 +405,19 @@ Lit Solver::pickBranchLit()
         if (value(next) == l_Undef && decision[next])
             rnd_decisions++; }
 
+	// Semirandom distribution:
+	Var v;
+	while (!order_heap.empty() && (value(v = order_heap[0]) != l_Undef || !decision[v])) order_heap.removeMin();
+	int i = 0;
+	while (drand(random_seed) > .8)
+		while (++i < order_heap.size() && (value(v = order_heap[i]) != l_Undef || !decision[v]));
+	if (i < order_heap.size()) next = i == 0 ? order_heap.removeMin() : order_heap[i];
+
+
     // Activity based decision:
     while (next == var_Undef || value(next) != l_Undef || !decision[next])
         if (order_heap.empty()){
-            next = var_Undef;
-            break;
+			return lit_Undef;
         } else {
 #if ANTI_EXPLORATION
             next = order_heap[0];
@@ -576,7 +584,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
     if (out_learnt.size() == 1)
         out_btlevel = 0;
     else{
-        /*int max_i = 1;
+        int max_i = 1;
         // Find the first literal assigned at the next-highest level:
         for (int i = 2; i < out_learnt.size(); i++)
             if (level(var(out_learnt[i])) > level(var(out_learnt[max_i])))
@@ -585,7 +593,7 @@ void Solver::analyze(CRef conf, vec<Lit>& out_learnt, int& out_btlevel)
         Lit p             = out_learnt[max_i];
         out_learnt[max_i] = out_learnt[1];
         out_learnt[1]     = p;
-        out_btlevel       = level(var(p));*/
+        out_btlevel       = level(var(p));
     }
 	// if (verbosity >= 3) printf("* Clause %d (length %d) conflicted at level %d, learning\n     clause of length %d and backtracking to level %d.\n", conf, ca[conf].size(), decisionLevel(), out_learnt.size(), out_btlevel);
 
@@ -943,12 +951,12 @@ inline bool Solver::detailClause(CRef cr, Clause& c, int maxlength) {
 |________________________________________________________________________________________________@*/
 struct reduceDB_lt { 
     ClauseAllocator& ca;
-#if LBD_BASED_CLAUSE_DELETION
+/*#if LBD_BASED_CLAUSE_DELETION
     vec<double>& activity;
     reduceDB_lt(ClauseAllocator& ca_,vec<double>& activity_) : ca(ca_), activity(activity_) {}
-#else
+#else*/
     reduceDB_lt(ClauseAllocator& ca_) : ca(ca_) {}
-#endif
+//#endif
     bool operator () (CRef x, CRef y) { 
 #if LBD_BASED_CLAUSE_DELETION
         return ca[x].activity() > ca[y].activity();
@@ -961,7 +969,7 @@ void Solver::reduceDB()
 {
     int     i, j;
 #if LBD_BASED_CLAUSE_DELETION
-    sort(learnts, reduceDB_lt(ca, activity));
+    sort(learnts, reduceDB_lt(ca));
 #else
     double  extra_lim = cla_inc / learnts.size();    // Remove any clause below this activity
     sort(learnts, reduceDB_lt(ca));
@@ -1132,7 +1140,7 @@ lbool Solver::search(int nof_conflicts)
                 claBumpActivity(ca[cr]);
 #endif
 				//assert(value(learnt_clause[0]) == l_Undef);
-                uncheckedEnqueue(learnt_clause[0], cr); // learnt_clause has not been sorted to the invariant yet, learnt_clause[0] is propagating by construction
+                uncheckedEnqueue(learnt_clause[0], cr);
             }
 
 #if BRANCHING_HEURISTIC == VSIDS
@@ -1166,7 +1174,7 @@ lbool Solver::search(int nof_conflicts)
 
             // Simplify the set of problem clauses:
 			if (decisionLevel() == 0 && !simplify()) {
-				printf("Returning l_False because no conflict returned, but !simplify() failed.\n");
+				if (verbosity >= 2) printf("Returning l_False because no conflict returned, but !simplify() failed.\n");
 				return l_False;
 			}
 
@@ -1394,9 +1402,8 @@ void Solver::analyzeProbabilities() {
 				// compute probability:
 				int np = to_prop[toInt(lp)];
 				int nn = to_prop[toInt(ln)];
-				double ep = pow(2, np);
-				double en = pow(2, nn);
-				double prob = (ep - .5) / (ep + en - 1.0);
+
+				double prob = probability(v);
 
 				// put instance in the right bin:
 				int bin = (int)(prob * 10);
@@ -1429,14 +1436,26 @@ void Solver::analyzeProbabilities() {
 	// Print analysis
 	printf("*****************************************\n");
 	printf(" Probability analysis\n");
-	printf(" Heuristic evaluated at each decision level,\n    problem clauses only, equally weighted\n\n");
-	printf(" Bin range    Frequency    Number of hits\n");
+	printf(" Heuristic evaluated at each decision level,\n    problem clauses only, weighted by amount of bits\n\n");
+	printf(" Bin range    Frequency    Number of bits\n");
 	for (int i = 0; i < 10; i++) {
 		printf(" %1.1f - %1.1f", (1.0 * i) / 10.0, (1.0 * i + 1) / 10.0);
 		if (weights[i] == 0) printf("       --- ");
 		else printf("      %3.3f", trues[i] * 1.0 / weights[i]);
 		printf("        %d\n", weights[i]);
 	}
+
+	/*printf("\n Testing the random number generator:\n\n");
+	int bins[10] = { 0,0,0,0,0,0,0,0,0,0 };
+	for (int i = 0; i < 1000; i++) {
+		int bin = (int)(drand(random_seed) * 10);
+		if (bin == 10) bin = 9;
+		bins[bin]++;
+	}
+	for (int i = 0; i < 10; i++) {
+		printf(" %1.1f - %1.1f", (1.0 * i) / 10.0, (1.0 * i + 1) / 10.0);
+		printf("      %d\n", bins[i]);
+	}*/
 
 }
 
