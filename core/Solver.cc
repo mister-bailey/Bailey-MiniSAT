@@ -258,13 +258,26 @@ void Solver::attachClause(CRef cr) {
 				if (li == INT_MAX) num_undef++;
 			}
 			if (value(c[2]) == l_False) {
+#if PROP_TRUES
+				if (value(c[1]) != l_True) incrementProp(c[0]);
+#else
 				incrementProp(c[0]);
+#endif
 				incrementProp(c[1]);
 			}
 		}
 		watches[~c[2]].push(Watcher(cr, c[0]));
 	} else {
+		if (assign_order[var(c[1])] > assign_order[var(c[0])]) {
+			Lit p = c[1];
+			c[1] = c[0];
+			c[0] = p;
+		}
+#if PROP_TRUES
+		if (value(c[1]) != l_True) incrementProp(c[0]);
+#else
 		incrementProp(c[0]);
+#endif
 		incrementProp(c[1]);
 	}
 	watches[~c[0]].push(Watcher(cr, c[1]));
@@ -278,21 +291,20 @@ void Solver::detachClause(CRef cr, bool strict) {
     const Clause& c = ca[cr];
     assert(c.size() > 1);
 
-	if (c.size() > 2) {
-		remove(watches[~c[2]], Watcher(cr, c[0]));
-		if (value(c[2]) == l_False) { // Assuming invariant holds!
-			decrementProp(c[0]);
-			decrementProp(c[1]);
-		}
-	}
-	else {
+	if (c.size() == 2 || value(c[2]) == l_False) {
+		// Assuming invariant holds!
+#if PROP_TRUES
+		if (value(c[1]) != l_True) decrementProp(c[0]);
+#else
 		decrementProp(c[0]);
+#endif
 		decrementProp(c[1]);
 	}
 
 	if (strict) {
 		remove(watches[~c[0]], Watcher(cr, c[1])); // Watcher equality doesn't depend on blockers!
 		remove(watches[~c[1]], Watcher(cr, c[0]));
+		if (c.size() > 2) remove(watches[~c[2]], Watcher(cr, c[0]));
     }else{
         // Lazy detaching: (NOTE! Must clean all watcher lists before garbage collecting this clause)
         watches.smudge(~c[0]);
@@ -372,14 +384,32 @@ void Solver::cancelUntil(int level) {
 #if PROP_STATS
 				for (Watcher* w = (Watcher*)watches[l], *end = w + watches[l].size(); w != end; w++) {
 					Clause& c = ca[w->cref];
-					if (c.size() == 2) continue;
-					Lit c0 = c[0], c1 = c[1], c2 = c[2];
+					//if (c.size() == 2) continue;
+					// By invariant, we only need check if c[2] == l:
+					if (c.size() > 2 && c[2] == l) decrementProp(c[0]), decrementProp(c[1]);
+					/*Lit c0 = c[0], c1 = c[1], c2 = c[2];
 					if (l_Undef == value(c2) && l_Undef == value(c1) && l_Undef == value(c0)) {
 						if (c0 != l) decrementProp(c0);
 						if (c1 != l) decrementProp(c1);
 						if (c2 != l) decrementProp(c2);
-					}
+					}*/
 				}
+#if PROP_TRUES
+				Lit p = ~l;
+				for (Watcher* w = (Watcher*)watches[p], *end = w + watches[p].size(); w != end; w++) {
+					Clause& c = ca[w->cref];
+					// By the invariant, this should be enough:
+					if (c[1] == p) incrementProp(c[0]);
+					/*if (c.size() == 2) {
+						if (c[1] == p) incrementProp(c[0]);
+						continue;
+					}
+					// size > 2
+					if (c[1] == p) incrementProp
+					*/
+				}
+
+#endif
 			}
 #endif
             if (phase_saving > 1 || (phase_saving == 1) && c > trail_lim.last())
@@ -800,7 +830,7 @@ CRef Solver::propagate()
 					if (verbosity >= 3) printf("Unit %d (%d) :\n", first, var(first));
 					uncheckedEnqueue(first, cr);
 				}
-			} else {
+			} else { // size > 2
 				// MAINTAIN INVARIANT: if any watch is false, c[2] is the oldest assignment amongst the 3 watched literals
 
 				i++;
@@ -904,6 +934,48 @@ CRef Solver::propagate()
         NextClause:;
         }
         ws.shrink(i - j);
+#if PROP_TRUES
+		for (i = (Watcher*)watches[~p], end = i + watches[~p].size(); i < end; i++) {
+			CRef     cr = i->cref;
+			Clause& c = ca[cr];
+			// p is in c, and it's being set to TRUE
+
+			if (c.size() == 2) {
+				if (c[0] == p && value(c[1]) == l_Undef) {
+					c[0] = c[1];
+					c[1] = p;
+					decrementProp(c[0]);
+				}
+				else if (value(c[0]) == l_Undef) decrementProp(c[0]);
+				continue;
+			}
+			// size > 2
+			lbool v2 = value(c[2]);
+			if (v2 == l_Undef) { // Assuming invariant, means no false terms in the first 3
+				if (c[0] == p) {
+					c[0] = c[2];
+					c[2] = p;
+				}
+				else {
+					c[1] = c[2];
+					c[2] = p;
+				}
+			}
+			else if (v2 == l_False) {
+				if (c[0] == p) {
+					if (value(c[1]) == l_Undef) {
+						c[0] = c[1];
+						c[1] = p;
+						decrementProp(c[0]);
+					}
+				}
+				else if (value(c[0]) == l_Undef) decrementProp(c[0]); // c[1] == p
+			}
+			else { // v2 = True, nothing to do
+			}
+
+		}
+#endif
     }
     propagations += num_props;
     simpDB_props -= num_props;
@@ -1356,6 +1428,7 @@ bool Solver::verify()
 // Does not work with "assumptions".
 //
 void Solver::analyzeProbabilities() {
+	printf("Made it here 1\n");
 	int n = nVars();
 	assert(n = trail.size());
 
@@ -1364,6 +1437,7 @@ void Solver::analyzeProbabilities() {
 		to_prop[toInt(mkLit(Var(i)))] = 0;
 		to_prop[toInt(~mkLit(Var(i)))] = 0;
 		if (assigns[i] == l_Undef) printf("Oops! Var %d is unassigned!\n",i);
+		printf("assigns[%d] == %d\n", i, assigns[i]);
 		assigns[i] = l_Undef;
 	}
 
@@ -1386,18 +1460,22 @@ void Solver::analyzeProbabilities() {
 		}
 	}
 
+	printf("Made it here 2\n");
+	printf("%d decision levels.\n", trail_lim.size());
+
 	// Going in order of the actual solution trail
 	// But you could try a randomized order (or an ensemble of orders)
 	// Currently computes probabilities only once per decision level
 	// But you could compute them after each assignment
 	for (int i = 0, level = 0; i < n; i++) {
 
-		if (i == trail_lim[level]) {
+		if (i == trail_lim[level] || i == n-1) {
 			// Compute statistics
-			//printf("Level %d\n", level);
-			for (int i = 0; i < n; i++) {
-				if (assigns[i] != l_Undef) continue;
-				Var v = Var(i);
+			printf("Level %d\n", level);
+			for (int j = 0; j < n; j++) {
+				lbool a = assigns[j];
+				if (assigns[j] != l_Undef) continue;
+				Var v = Var(j);
 				Lit lp = mkLit(v), ln = ~lp;
 				// compute probability:
 				int np = to_prop[toInt(lp)];
@@ -1408,7 +1486,7 @@ void Solver::analyzeProbabilities() {
 				// put instance in the right bin:
 				int bin = (int)(prob * 10);
 				if (bin == 10) bin = 9;
-				if (model[i] == l_True) trues[bin] += np + nn;
+				if (model[j] == l_True) trues[bin] += np + nn;
 				else falses[bin] += np + nn;
 				weights[bin] += np + nn;
 			}
@@ -1417,10 +1495,11 @@ void Solver::analyzeProbabilities() {
 		}
 
 		Lit lit = trail[i], flit = ~lit;
-		Var v = var(lit);
+		//Var v = var(lit);
+		//if (level == 30) printf("Lit %d (Var %d) == l_False\n", flit, var(lit));
+
 		Watcher* w, * end;
-		vec<Watcher>& ws = watches[lit];
-		for (w = (Watcher*)ws, end = w + ws.size(); w != end; w++) {
+		for (w = (Watcher*)watches[lit], end = w + watches[lit].size(); w != end; w++) {
 			CRef cr = w->cref;
 			Clause& c = ca[cr];
 
@@ -1428,11 +1507,18 @@ void Solver::analyzeProbabilities() {
 				to_prop[toInt(c[0])]++;
 				to_prop[toInt(c[1])]++;
 			}
-
-
 		}
+#if PROP_TRUES
+		//if (level == 30) printf("  Lit %d (Var %d) == l_True\n", lit, var(lit));
+		for (w = (Watcher*)watches[flit], end = w + watches[flit].size(); w != end; w++) {
+			CRef cr = w->cref;
+			Clause& c = ca[cr];
 
+			if (c[1] == lit) to_prop[toInt(c[0])]--;
+		}
+#endif
 	}
+
 	// Print analysis
 	printf("*****************************************\n");
 	printf(" Probability analysis\n");
